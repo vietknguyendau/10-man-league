@@ -82,3 +82,178 @@ export default function HomePage() {
     <>
       <header className="top">
         <div className="brand">
+          <span className="eyebrow">10 Man League</span>
+          <h1>{LEAGUE_NAME}</h1>
+        </div>
+      </header>
+
+      <div className="wrap">
+        <div className="empty-state" style={{ padding: '18px 0 2px' }}>
+          <div className="big">🏈 Season in progress</div>
+          <div style={{ color: 'var(--sub)', fontSize: 13 }}>Weekly results and live standings below.</div>
+        </div>
+
+        <div className="tabbar">
+          <button className={`tab-btn ${activeTab === 'board' ? 'active' : ''}`} onClick={() => setActiveTab('board')}>Draft Board</button>
+          <button className={`tab-btn ${activeTab === 'scores' ? 'active' : ''}`} onClick={() => setActiveTab('scores')}>Weekly Scores</button>
+          <button className={`tab-btn ${activeTab === 'standings' ? 'active' : ''}`} onClick={() => setActiveTab('standings')}>Standings</button>
+        </div>
+
+        {activeTab === 'board' && (
+          <>
+            <div className="board-scroll"><BoardTable /></div>
+            <RemainingBox />
+          </>
+        )}
+        {activeTab === 'scores' && <ScoresTab />}
+        {activeTab === 'standings' && <StandingsTab />}
+
+        <p className="footer-note">
+          Pot: <span className="pot">${pot}</span> · Best record &amp; worst record split the pot (ties broken by best/worst single-team record) · No head-to-head · 16 week season
+        </p>
+      </div>
+    </>
+  );
+}
+
+function BoardTable() {
+  return (
+    <table className="board">
+      <thead>
+        <tr>{DRAFT_ORDER.map((id, i) => <th key={id}><span className="n">{i + 1}</span>{managerById(id)?.name}</th>)}</tr>
+      </thead>
+      <tbody>
+        {Array.from({ length: ROUNDS_PER_MANAGER }).map((_, r) => (
+          <tr key={r}>
+            {DRAFT_ORDER.map((id) => {
+              const p = picksForManager(id)[r];
+              if (!p) return <td key={id}><span className="empty-slot">—</span></td>;
+              const t = TEAM_MAP[p.team];
+              return <td key={id}><span className="team-tag"><span className="sw" style={{ background: t.color }}></span>{t.abbr}</span></td>;
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function RemainingBox() {
+  const drafted = draftedAbbrs();
+  const remaining = TEAMS.filter((t) => !drafted.has(t.abbr));
+  if (!remaining.length) return null;
+  return (
+    <div className="remaining-box">
+      <div className="lbl">Untouched teams ({remaining.length})</div>
+      <div className="tags">
+        {remaining.map((t) => <span key={t.abbr} className="team-tag"><span className="sw" style={{ background: t.color }}></span>{t.abbr}</span>)}
+      </div>
+    </div>
+  );
+}
+
+function ScoresTab() {
+  const weeksWithData = Object.keys(WEEKLY_RESULTS).map(Number).sort((a, b) => a - b);
+  const [activeWeek, setActiveWeek] = useState(weeksWithData.length ? weeksWithData[weeksWithData.length - 1] : 1);
+  const weekMap = WEEKLY_RESULTS[activeWeek] || {};
+  const draftedList = PICKS.slice().sort((a, b) => a.team.localeCompare(b.team));
+
+  return (
+    <>
+      <div className="week-pager">
+        <button className="nav-arrow" onClick={() => setActiveWeek((w) => Math.max(1, w - 1))}>‹</button>
+        <select value={activeWeek} onChange={(e) => setActiveWeek(parseInt(e.target.value))}>
+          {Array.from({ length: TOTAL_WEEKS }, (_, i) => i + 1).map((w) => (
+            <option key={w} value={w}>Week {w}{WEEKLY_RESULTS[w] ? '' : ' (no results yet)'}</option>
+          ))}
+        </select>
+        <button className="nav-arrow" onClick={() => setActiveWeek((w) => Math.min(TOTAL_WEEKS, w + 1))}>›</button>
+      </div>
+      {!WEEKLY_RESULTS[activeWeek] && (
+        <p style={{ color: 'var(--sub)', fontSize: 13, marginBottom: 14 }}>No results entered for this week yet.</p>
+      )}
+      <div className="card">
+        {draftedList.map((p) => {
+          const t = TEAM_MAP[p.team];
+          const r = weekMap[p.team];
+          return (
+            <div className="score-row" key={p.team}>
+              <span className="team-tag">
+                <span className="sw" style={{ background: t.color }}></span>{t.abbr}
+                <span style={{ color: 'var(--sub)', fontWeight: 400 }}> — {managerById(p.managerId)?.name}</span>
+              </span>
+              <span className={`result-pill ${r || ''}`}>{r || '—'}</span>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function StandingsTab() {
+  const standings = computeStandings();
+  const anyGames = standings.some((s) => s.w + s.l + s.t > 0);
+  const splits = anyGames ? determinePotSplits(standings) : { topIds: [], bottomIds: [] };
+
+  function badgeAndNote(s) {
+    const isTop = splits.topIds.includes(s.manager.id);
+    const isBottom = splits.bottomIds.includes(s.manager.id);
+    let badge = null, note = '', cls = '';
+    if (isTop) {
+      cls = 'top';
+      if (splits.topResolved && splits.topIds.length === 1) {
+        badge = 'Best · wins tiebreaker';
+        const t = splits.topTeam[s.manager.id];
+        if (t) note = `Tied on combined record — won on best single team (${t.abbr} ${t.w}-${t.l}${t.t ? '-' + t.t : ''}).`;
+      } else {
+        badge = 'Best · splits pot';
+        if (splits.topHadTie) note = 'Tied on combined record and best single team — splitting this half of the pot.';
+      }
+    } else if (isBottom) {
+      cls = 'bottom';
+      if (splits.bottomResolved && splits.bottomIds.length === 1) {
+        badge = 'Worst · wins tiebreaker';
+        const t = splits.bottomTeam[s.manager.id];
+        if (t) note = `Tied on combined record — "won" on worst single team (${t.abbr} ${t.w}-${t.l}${t.t ? '-' + t.t : ''}).`;
+      } else {
+        badge = 'Worst · splits pot';
+        if (splits.bottomHadTie) note = 'Tied on combined record and worst single team — splitting this half of the pot.';
+      }
+    }
+    return { cls, badge, note };
+  }
+
+  return (
+    <>
+      {!anyGames && <p style={{ color: 'var(--sub)', fontSize: 13, marginBottom: 14 }}>No results entered yet.</p>}
+      <div className="standings-list">
+        {standings.map((s, i) => {
+          const { cls, badge, note } = anyGames ? badgeAndNote(s) : { cls: '', badge: null, note: '' };
+          return (
+            <div className={`standing-item ${cls}`} key={s.manager.id}>
+              <span className="rank">{i + 1}</span>
+              <div style={{ flex: 1 }}>
+                <div className="name">{s.manager.name}{badge && <span className="badge">{badge}</span>}</div>
+                <div className="teams">
+                  {s.teams.map((abbr) => {
+                    const t = TEAM_MAP[abbr];
+                    return <span key={abbr} className="team-tag" style={{ padding: '2px 6px', fontSize: 10.5 }}><span className="sw" style={{ background: t.color }}></span>{abbr}</span>;
+                  })}
+                </div>
+                {note && <div className="note">{note}</div>}
+              </div>
+              <div>
+                <div className="record">{s.w}-{s.l}{s.t ? `-${s.t}` : ''}</div>
+                <div className="pct">{(s.pct * 100).toFixed(1)}%</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p style={{ color: 'var(--sub)', fontSize: 11.5, marginTop: 16, lineHeight: 1.6 }}>
+        Combined win % across each manager's teams. Best record and worst record split the pot — no head-to-head. Ties are broken by best/worst single-team record; still tied splits evenly.
+      </p>
+    </>
+  );
+}
