@@ -127,3 +127,6 @@ table.board td .empty-slot{color:#444; font-size:12px; font-style:italic;}
 .rlt-btn[data-active="true"][data-r="W"]{background:#213a12; border-color:#3f7a20; color:#a5ff6e;}
 .rlt-btn[data-active="true"][data-r="L"]{background:#3a1414; border-color:#7a2020; color:#ff8f8f;}
 .rlt-btn[data-active="true"][data-r="T"]{background:#2a2a10; border-color:#6a6a20; color:#e8e090;}
+.btn.small{padding:7px 11px; font-size:12px;}
+.btn.danger{color:#e34848; border-color:#3a2020;}
+.btn.danger:hover{background:#241212;}
