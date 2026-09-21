@@ -5,18 +5,70 @@ import { TEAMS, TEAM_MAP } from '../lib/teams';
 import { MANAGERS, DRAFT_ORDER, PICKS, ROUNDS_PER_MANAGER, LEAGUE_NAME, BUY_IN } from '../lib/draftResults';
 
 const TOTAL_WEEKS = 16;
+const ALL_TEAM_ABBRS = PICKS.map((p) => p.team);
+
+// Lightweight deterrent, not real security — anyone who views the page
+// source could find this. It just protects Save/Trade actions from
+// accidental or casual taps by someone other than you.
+const SAVE_PIN = '1234';
+const UNLOCK_KEY = 'nfl10man:editUnlocked';
 
 function managerById(id) { return MANAGERS.find((m) => m.id === id); }
-function picksForManager(id) { return PICKS.filter((p) => p.managerId === id); }
-function draftedAbbrs() { return new Set(PICKS.map((p) => p.team)); }
+function originalOwnerOf(abbr) { return PICKS.find((p) => p.team === abbr)?.managerId; }
 
-function computeStandings(weeklyResults) {
+// Trades affecting one team, sorted by when they took effect.
+function tradesForTeam(abbr, trades) {
+  return trades.filter((t) => t.team === abbr).sort((a, b) => a.effectiveWeek - b.effectiveWeek);
+}
+
+// Who owns this team right now (after all recorded trades)?
+function currentOwnerOf(abbr, trades) {
+  let owner = originalOwnerOf(abbr);
+  tradesForTeam(abbr, trades).forEach((t) => { owner = t.toManagerId; });
+  return owner;
+}
+
+// Who owned this team during a specific week (accounting for trade timing)?
+function ownerAtWeek(abbr, week, trades) {
+  let owner = originalOwnerOf(abbr);
+  tradesForTeam(abbr, trades).forEach((t) => { if (t.effectiveWeek <= week) owner = t.toManagerId; });
+  return owner;
+}
+
+// The week the CURRENT owner's stretch with this team began (1 if never
+// traded into them, or the effectiveWeek of the trade that brought it to them).
+// Walks every trade in order rather than stopping at the first match, so a
+// team traded more than once in a season still attributes credit correctly.
+function ownershipStartWeek(abbr, managerId, trades) {
+  const sorted = tradesForTeam(abbr, trades);
+  let owner = originalOwnerOf(abbr);
+  let lastStart = (owner === managerId) ? 1 : null;
+  for (const t of sorted) {
+    owner = t.toManagerId;
+    lastStart = (owner === managerId) ? t.effectiveWeek : null;
+  }
+  return owner === managerId ? lastStart : null;
+}
+
+function recordForTeams(teams, weekData) {
+  let w = 0, l = 0, t = 0;
+  teams.forEach((abbr) => {
+    const r = weekData[abbr];
+    if (r === 'W') w++; else if (r === 'L') l++; else if (r === 'T') t++;
+  });
+  return { w, l, t };
+}
+
+function computeStandings(weeklyResults, trades) {
   return MANAGERS.map((m) => {
-    const teams = picksForManager(m.id).map((p) => p.team);
-    const teamStats = teams.map((abbr) => {
+    const myTeams = ALL_TEAM_ABBRS.filter((abbr) => currentOwnerOf(abbr, trades) === m.id);
+    const teamStats = myTeams.map((abbr) => {
+      const startWeek = ownershipStartWeek(abbr, m.id, trades) || 1;
       let tw = 0, tl = 0, tt = 0;
-      Object.values(weeklyResults).forEach((wk) => {
-        const r = wk[abbr];
+      Object.keys(weeklyResults).forEach((wkStr) => {
+        const week = Number(wkStr);
+        if (week < startWeek) return; // credit only counts from when they actually owned it
+        const r = weeklyResults[wkStr][abbr];
         if (r === 'W') tw++; else if (r === 'L') tl++; else if (r === 'T') tt++;
       });
       const tgp = tw + tl + tt;
@@ -30,7 +82,7 @@ function computeStandings(weeklyResults) {
     const played = teamStats.filter((ts) => ts.pct !== null).map((ts) => ts.pct);
     const bestTeamPct = played.length ? Math.max(...played) : null;
     const worstTeamPct = played.length ? Math.min(...played) : null;
-    return { manager: m, teams, teamStats, w, l, t, pct, bestTeamPct, worstTeamPct };
+    return { manager: m, teams: myTeams, teamStats, w, l, t, pct, bestTeamPct, worstTeamPct };
   }).sort((a, b) => b.pct - a.pct || b.w - a.w);
 }
 
@@ -73,23 +125,77 @@ function determinePotSplits(standings) {
   };
 }
 
+function useUnlock() {
+  const [unlocked, setUnlocked] = useState(false);
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.sessionStorage.getItem(UNLOCK_KEY) === 'true') {
+      setUnlocked(true);
+    }
+  }, []);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
+  function tryUnlock() {
+    if (pinInput === SAVE_PIN) {
+      setUnlocked(true);
+      setPinError('');
+      if (typeof window !== 'undefined') window.sessionStorage.setItem(UNLOCK_KEY, 'true');
+    } else {
+      setPinError('Wrong PIN.');
+    }
+  }
+  return { unlocked, pinInput, setPinInput, pinError, setPinError, tryUnlock };
+}
+
+function PinGate({ pin }) {
+  return (
+    <div className="card" style={{ marginBottom: 16, borderColor: 'var(--accent-dim)' }}>
+      <div style={{ fontSize: 13, color: 'var(--sub)', marginBottom: 10 }}>Enter PIN to make changes. Everyone can still view without it.</div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <input
+          type="password"
+          inputMode="numeric"
+          value={pin.pinInput}
+          onChange={(e) => { pin.setPinInput(e.target.value); pin.setPinError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') pin.tryUnlock(); }}
+          placeholder="PIN"
+          style={{ width: 100, background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 }}
+        />
+        <button className="btn" onClick={pin.tryUnlock}>Unlock</button>
+      </div>
+      {pin.pinError && <div style={{ color: '#ff8f8f', fontSize: 12, marginTop: 8 }}>{pin.pinError}</div>}
+    </div>
+  );
+}
+
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState('board');
   const [weeklyResults, setWeeklyResults] = useState({});
+  const [trades, setTrades] = useState([]);
   const [syncStatus, setSyncStatus] = useState('connecting');
-  const lastJsonRef = useRef('{}');
+  const lastResultsJsonRef = useRef('{}');
+  const lastTradesJsonRef = useRef('[]');
   const pot = BUY_IN * MANAGERS.length;
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/weekly-results', { cache: 'no-store' });
-      const data = await res.json();
-      const json = JSON.stringify(data.results || {});
-      if (json !== lastJsonRef.current) {
-        lastJsonRef.current = json;
-        setWeeklyResults(data.results || {});
+      const [resR, resT] = await Promise.all([
+        fetch('/api/weekly-results', { cache: 'no-store' }),
+        fetch('/api/trades', { cache: 'no-store' }),
+      ]);
+      const dataR = await resR.json();
+      const dataT = await resT.json();
+
+      const rJson = JSON.stringify(dataR.results || {});
+      if (rJson !== lastResultsJsonRef.current) {
+        lastResultsJsonRef.current = rJson;
+        setWeeklyResults(dataR.results || {});
       }
-      setSyncStatus(data.error ? 'error' : 'synced');
+      const tJson = JSON.stringify(dataT.trades || []);
+      if (tJson !== lastTradesJsonRef.current) {
+        lastTradesJsonRef.current = tJson;
+        setTrades(dataT.trades || []);
+      }
+      setSyncStatus((dataR.error || dataT.error) ? 'error' : 'synced');
     } catch (e) {
       setSyncStatus('error');
     }
@@ -111,8 +217,28 @@ export default function HomePage() {
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      lastJsonRef.current = JSON.stringify(data.results);
+      lastResultsJsonRef.current = JSON.stringify(data.results);
       setWeeklyResults(data.results);
+      setSyncStatus('synced');
+      return { ok: true };
+    } catch (e) {
+      setSyncStatus('error');
+      return { error: true };
+    }
+  }, []);
+
+  const saveTrades = useCallback(async (nextTrades) => {
+    setSyncStatus('connecting');
+    try {
+      const res = await fetch('/api/trades', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trades: nextTrades }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      lastTradesJsonRef.current = JSON.stringify(data.trades);
+      setTrades(data.trades);
       setSyncStatus('synced');
       return { ok: true };
     } catch (e) {
@@ -144,16 +270,25 @@ export default function HomePage() {
           <button className={`tab-btn ${activeTab === 'board' ? 'active' : ''}`} onClick={() => setActiveTab('board')}>Draft Board</button>
           <button className={`tab-btn ${activeTab === 'scores' ? 'active' : ''}`} onClick={() => setActiveTab('scores')}>Weekly Scores</button>
           <button className={`tab-btn ${activeTab === 'standings' ? 'active' : ''}`} onClick={() => setActiveTab('standings')}>Standings</button>
+          <button className={`tab-btn ${activeTab === 'trend' ? 'active' : ''}`} onClick={() => setActiveTab('trend')}>Trend</button>
+          <button className={`tab-btn ${activeTab === 'trades' ? 'active' : ''}`} onClick={() => setActiveTab('trades')}>Teams &amp; Trades</button>
         </div>
 
         {activeTab === 'board' && (
           <>
             <div className="board-scroll"><BoardTable /></div>
             <RemainingBox />
+            {trades.length > 0 && (
+              <p style={{ color: 'var(--sub)', fontSize: 12, marginTop: 12 }}>
+                This shows the original draft. Current ownership after trades is on the <b style={{ color: 'var(--text)' }}>Teams &amp; Trades</b> tab.
+              </p>
+            )}
           </>
         )}
         {activeTab === 'scores' && <ScoresTab weeklyResults={weeklyResults} saveResults={saveResults} onRefresh={load} />}
-        {activeTab === 'standings' && <StandingsTab weeklyResults={weeklyResults} />}
+        {activeTab === 'standings' && <StandingsTab weeklyResults={weeklyResults} trades={trades} />}
+        {activeTab === 'trend' && <TrendTab weeklyResults={weeklyResults} trades={trades} />}
+        {activeTab === 'trades' && <TeamsTradesTab trades={trades} saveTrades={saveTrades} onRefresh={load} />}
 
         <p className="footer-note">
           Pot: <span className="pot">${pot}</span> · Best record &amp; worst record split the pot (ties broken by best/worst single-team record) · No head-to-head · 16 week season
@@ -164,6 +299,7 @@ export default function HomePage() {
 }
 
 function BoardTable() {
+  const picksForManager = (id) => PICKS.filter((p) => p.managerId === id);
   return (
     <table className="board">
       <thead>
@@ -186,7 +322,7 @@ function BoardTable() {
 }
 
 function RemainingBox() {
-  const drafted = draftedAbbrs();
+  const drafted = new Set(ALL_TEAM_ABBRS);
   const remaining = TEAMS.filter((t) => !drafted.has(t.abbr));
   if (!remaining.length) return null;
   return (
@@ -200,6 +336,8 @@ function RemainingBox() {
 }
 
 function ScoresTab({ weeklyResults, saveResults, onRefresh }) {
+  const pin = useUnlock();
+  const { unlocked } = pin;
   const [activeWeek, setActiveWeek] = useState(1);
   const weekMap = weeklyResults[String(activeWeek)] || {};
   const [pending, setPending] = useState({ ...weekMap });
@@ -237,8 +375,11 @@ function ScoresTab({ weeklyResults, saveResults, onRefresh }) {
           ))}
         </select>
         <button className="nav-arrow" onClick={() => setActiveWeek((w) => Math.min(TOTAL_WEEKS, w + 1))}>›</button>
-        <span style={{ color: 'var(--sub)', fontSize: 12, marginLeft: 6 }}>Tap W / L / T for each team, then Save</span>
+        {unlocked && <span style={{ color: 'var(--sub)', fontSize: 12, marginLeft: 6 }}>Tap W / L / T for each team, then Save</span>}
       </div>
+
+      {!unlocked && <PinGate pin={pin} />}
+
       <div className="card">
         {draftedList.map((p) => {
           const t = TEAM_MAP[p.team];
@@ -249,38 +390,36 @@ function ScoresTab({ weeklyResults, saveResults, onRefresh }) {
                 <span className="sw" style={{ background: t.color }}></span>{t.abbr}
                 <span style={{ color: 'var(--sub)', fontWeight: 400 }}> — {managerById(p.managerId)?.name}</span>
               </span>
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 5 }}>
-                {['W', 'L', 'T'].map((r) => (
-                  <button
-                    key={r}
-                    data-r={r}
-                    data-active={cur === r}
-                    className="rlt-btn"
-                    onClick={() => toggle(p.team, r)}
-                  >{r}</button>
-                ))}
-              </div>
+              {unlocked ? (
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 5 }}>
+                  {['W', 'L', 'T'].map((r) => (
+                    <button key={r} data-r={r} data-active={cur === r} className="rlt-btn" onClick={() => toggle(p.team, r)}>{r}</button>
+                  ))}
+                </div>
+              ) : (
+                <span style={{ marginLeft: 'auto', color: 'var(--sub)', fontFamily: 'var(--font-display)', fontWeight: 700 }}>
+                  {weekMap[p.team] || '—'}
+                </span>
+              )}
             </div>
           );
         })}
       </div>
-      <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-        <button
-          className="btn primary"
-          style={{ flex: 1 }}
-          disabled={saving}
-          onClick={handleSave}
-        >
-          {saving ? 'Saving…' : `Save Week ${activeWeek}`}
-        </button>
-        <button className="btn" onClick={onRefresh}>↻</button>
-      </div>
+
+      {unlocked && (
+        <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+          <button className="btn primary" style={{ flex: 1 }} disabled={saving} onClick={handleSave}>
+            {saving ? 'Saving…' : `Save Week ${activeWeek}`}
+          </button>
+          <button className="btn" onClick={onRefresh}>↻</button>
+        </div>
+      )}
     </>
   );
 }
 
-function StandingsTab({ weeklyResults }) {
-  const standings = computeStandings(weeklyResults);
+function StandingsTab({ weeklyResults, trades }) {
+  const standings = computeStandings(weeklyResults, trades);
   const anyGames = standings.some((s) => s.w + s.l + s.t > 0);
   const splits = anyGames ? determinePotSplits(standings) : { topIds: [], bottomIds: [] };
 
@@ -340,8 +479,179 @@ function StandingsTab({ weeklyResults }) {
         })}
       </div>
       <p style={{ color: 'var(--sub)', fontSize: 11.5, marginTop: 16, lineHeight: 1.6 }}>
-        Combined win % across each manager's teams. Best record and worst record split the pot — no head-to-head. Ties are broken by best/worst single-team record; still tied splits evenly.
+        Combined win % across each manager's teams (traded teams only count games since the trade took effect). Best record and worst record split the pot — no head-to-head. Ties are broken by best/worst single-team record; still tied splits evenly.
       </p>
+    </>
+  );
+}
+
+function TrendTab({ weeklyResults, trades }) {
+  const weeksWithData = Object.keys(weeklyResults).map(Number).sort((a, b) => a - b);
+  const standings = computeStandings(weeklyResults, trades);
+
+  if (!weeksWithData.length) {
+    return <p style={{ color: 'var(--sub)', fontSize: 13 }}>No results entered yet — the week-by-week trend will show up here once scores start coming in.</p>;
+  }
+
+  function cellStyle(rec) {
+    if (rec.w + rec.l + rec.t === 0) return { color: 'var(--sub)' };
+    if (rec.w > rec.l) return { color: '#a5ff6e' };
+    if (rec.l > rec.w) return { color: '#ff8f8f' };
+    return { color: '#e8e090' };
+  }
+
+  return (
+    <div className="board-scroll">
+      <table className="board">
+        <thead>
+          <tr>
+            <th>Manager</th>
+            {weeksWithData.map((w) => <th key={w}><span className="n">Wk</span>{w}</th>)}
+            <th><span className="n">Season</span>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {standings.map((s) => (
+            <tr key={s.manager.id}>
+              <td style={{ fontWeight: 700 }}>{s.manager.name}</td>
+              {weeksWithData.map((w) => {
+                const teamsThatWeek = ALL_TEAM_ABBRS.filter((abbr) => ownerAtWeek(abbr, w, trades) === s.manager.id);
+                const rec = recordForTeams(teamsThatWeek, weeklyResults[String(w)] || {});
+                return (
+                  <td key={w} style={{ textAlign: 'center', fontFamily: 'var(--font-display)', fontWeight: 700, ...cellStyle(rec) }}>
+                    {rec.w}-{rec.l}{rec.t ? `-${rec.t}` : ''}
+                  </td>
+                );
+              })}
+              <td style={{ textAlign: 'center', fontFamily: 'var(--font-display)', fontWeight: 700, color: 'var(--accent)' }}>
+                {s.w}-{s.l}{s.t ? `-${s.t}` : ''}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
+  const pin = useUnlock();
+  const { unlocked } = pin;
+  const [tradingAbbr, setTradingAbbr] = useState(null);
+  const [newOwnerId, setNewOwnerId] = useState('');
+  const [effectiveWeek, setEffectiveWeek] = useState(1);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const sortedTeams = ALL_TEAM_ABBRS.slice().sort();
+
+  function openTradeForm(abbr) {
+    setTradingAbbr(abbr);
+    setNewOwnerId('');
+    setEffectiveWeek(1);
+    setError('');
+  }
+
+  async function confirmTrade() {
+    if (!newOwnerId) { setError('Pick who the team is going to.'); return; }
+    const abbr = tradingAbbr;
+    const fromManagerId = currentOwnerOf(abbr, trades);
+    if (newOwnerId === fromManagerId) { setError('That manager already owns this team.'); return; }
+    setSaving(true);
+    const trade = {
+      id: `${abbr}-${Date.now()}`,
+      team: abbr,
+      fromManagerId,
+      toManagerId: newOwnerId,
+      effectiveWeek: parseInt(effectiveWeek) || 1,
+      createdAt: Date.now(),
+    };
+    await saveTrades([...trades, trade]);
+    setSaving(false);
+    setTradingAbbr(null);
+  }
+
+  async function undoTrade(id) {
+    if (!confirm('Undo this trade?')) return;
+    await saveTrades(trades.filter((t) => t.id !== id));
+  }
+
+  const history = trades.slice().sort((a, b) => b.createdAt - a.createdAt);
+
+  return (
+    <>
+      {!unlocked && <PinGate pin={pin} />}
+
+      <h2 className="section-title">Teams</h2>
+      <p style={{ color: 'var(--sub)', fontSize: 13, margin: '0 0 14px 0' }}>
+        {unlocked ? 'Tap the trade icon to move a team to a new owner starting a given week.' : 'Current ownership after any trades. Unlock above to make a trade.'}
+      </p>
+      <div className="card">
+        {sortedTeams.map((abbr) => {
+          const t = TEAM_MAP[abbr];
+          const ownerId = currentOwnerOf(abbr, trades);
+          const owner = managerById(ownerId);
+          return (
+            <div className="score-row" key={abbr}>
+              <span className="team-tag">
+                <span className="sw" style={{ background: t.color }}></span>{abbr}
+              </span>
+              <span style={{ color: 'var(--sub)', marginLeft: 10 }}>{owner?.name}</span>
+              {unlocked && (
+                <button className="btn small" style={{ marginLeft: 'auto', padding: '6px 10px' }} onClick={() => openTradeForm(abbr)}>⇄ Trade</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {unlocked && tradingAbbr && (
+        <div className="card" style={{ marginTop: 16, borderColor: 'var(--accent-dim)' }}>
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: 15, marginBottom: 12 }}>
+            Trade <span style={{ color: 'var(--accent)' }}>{tradingAbbr}</span> from {managerById(currentOwnerOf(tradingAbbr, trades))?.name}
+          </div>
+          <div className="row" style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}>
+              <label className="field-label">To manager</label>
+              <select value={newOwnerId} onChange={(e) => setNewOwnerId(e.target.value)} style={{ width: '100%', background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 }}>
+                <option value="">— pick manager —</option>
+                {MANAGERS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="field-label">Effective week</label>
+              <input type="number" min={1} max={16} value={effectiveWeek} onChange={(e) => setEffectiveWeek(e.target.value)} style={{ width: 80, background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 }} />
+            </div>
+          </div>
+          {error && <div style={{ color: '#ff8f8f', fontSize: 12, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="btn primary" style={{ flex: 1 }} disabled={saving} onClick={confirmTrade}>{saving ? 'Saving…' : 'Confirm Trade'}</button>
+            <button className="btn" onClick={() => setTradingAbbr(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <h2 className="section-title">Trade History</h2>
+      {history.length === 0 ? (
+        <p style={{ color: 'var(--sub)', fontSize: 13 }}>No trades yet.</p>
+      ) : (
+        <div className="card">
+          {history.map((t) => {
+            const team = TEAM_MAP[t.team];
+            return (
+              <div className="score-row" key={t.id}>
+                <span className="team-tag"><span className="sw" style={{ background: team.color }}></span>{t.team}</span>
+                <span style={{ color: 'var(--sub)', fontSize: 13, marginLeft: 10 }}>
+                  {managerById(t.fromManagerId)?.name} → {managerById(t.toManagerId)?.name}, effective Week {t.effectiveWeek}
+                </span>
+                {unlocked && (
+                  <button className="btn small danger" style={{ marginLeft: 'auto', padding: '6px 10px' }} onClick={() => undoTrade(t.id)}>Undo</button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </>
   );
 }
