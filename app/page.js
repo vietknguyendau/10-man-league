@@ -35,21 +35,6 @@ function ownerAtWeek(abbr, week, trades) {
   return owner;
 }
 
-// The week the CURRENT owner's stretch with this team began (1 if never
-// traded into them, or the effectiveWeek of the trade that brought it to them).
-// Walks every trade in order rather than stopping at the first match, so a
-// team traded more than once in a season still attributes credit correctly.
-function ownershipStartWeek(abbr, managerId, trades) {
-  const sorted = tradesForTeam(abbr, trades);
-  let owner = originalOwnerOf(abbr);
-  let lastStart = (owner === managerId) ? 1 : null;
-  for (const t of sorted) {
-    owner = t.toManagerId;
-    lastStart = (owner === managerId) ? t.effectiveWeek : null;
-  }
-  return owner === managerId ? lastStart : null;
-}
-
 function recordForTeams(teams, weekData) {
   let w = 0, l = 0, t = 0;
   teams.forEach((abbr) => {
@@ -59,30 +44,46 @@ function recordForTeams(teams, weekData) {
   return { w, l, t };
 }
 
+// Builds every manager's season totals by walking each recorded week and
+// crediting whoever owned each team THAT week (per ownerAtWeek). This way a
+// manager keeps every result they earned before a trade forever — trading a
+// team away never erases the games already played under that manager, it
+// just stops adding new ones to their total going forward.
 function computeStandings(weeklyResults, trades) {
-  return MANAGERS.map((m) => {
-    const myTeams = ALL_TEAM_ABBRS.filter((abbr) => currentOwnerOf(abbr, trades) === m.id);
-    const teamStats = myTeams.map((abbr) => {
-      const startWeek = ownershipStartWeek(abbr, m.id, trades) || 1;
-      let tw = 0, tl = 0, tt = 0;
-      Object.keys(weeklyResults).forEach((wkStr) => {
-        const week = Number(wkStr);
-        if (week < startWeek) return; // credit only counts from when they actually owned it
-        const r = weeklyResults[wkStr][abbr];
-        if (r === 'W') tw++; else if (r === 'L') tl++; else if (r === 'T') tt++;
-      });
-      const tgp = tw + tl + tt;
-      const tpct = tgp ? (tw + 0.5 * tt) / tgp : null;
-      return { abbr, w: tw, l: tl, t: tt, pct: tpct };
+  const totals = {};
+  const perTeam = {};
+  MANAGERS.forEach((m) => { totals[m.id] = { w: 0, l: 0, t: 0 }; perTeam[m.id] = {}; });
+
+  Object.keys(weeklyResults).forEach((wkStr) => {
+    const week = Number(wkStr);
+    const wkData = weeklyResults[wkStr] || {};
+    ALL_TEAM_ABBRS.forEach((abbr) => {
+      const r = wkData[abbr];
+      if (!r) return;
+      const ownerId = ownerAtWeek(abbr, week, trades);
+      if (!ownerId || !totals[ownerId]) return;
+      const key = r === 'W' ? 'w' : r === 'L' ? 'l' : 't';
+      totals[ownerId][key] += 1;
+      if (!perTeam[ownerId][abbr]) perTeam[ownerId][abbr] = { w: 0, l: 0, t: 0 };
+      perTeam[ownerId][abbr][key] += 1;
     });
-    let w = 0, l = 0, t = 0;
-    teamStats.forEach((ts) => { w += ts.w; l += ts.l; t += ts.t; });
+  });
+
+  return MANAGERS.map((m) => {
+    const currentTeams = ALL_TEAM_ABBRS.filter((abbr) => currentOwnerOf(abbr, trades) === m.id);
+    const teamStats = Object.keys(perTeam[m.id]).map((abbr) => {
+      const ts = perTeam[m.id][abbr];
+      const tgp = ts.w + ts.l + ts.t;
+      const tpct = tgp ? (ts.w + 0.5 * ts.t) / tgp : null;
+      return { abbr, ...ts, pct: tpct };
+    });
+    const { w, l, t } = totals[m.id];
     const gp = w + l + t;
     const pct = gp ? (w + 0.5 * t) / gp : 0;
     const played = teamStats.filter((ts) => ts.pct !== null).map((ts) => ts.pct);
     const bestTeamPct = played.length ? Math.max(...played) : null;
     const worstTeamPct = played.length ? Math.min(...played) : null;
-    return { manager: m, teams: myTeams, teamStats, w, l, t, pct, bestTeamPct, worstTeamPct };
+    return { manager: m, teams: currentTeams, teamStats, w, l, t, pct, bestTeamPct, worstTeamPct };
   }).sort((a, b) => b.pct - a.pct || b.w - a.w);
 }
 
