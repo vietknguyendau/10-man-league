@@ -285,7 +285,7 @@ export default function HomePage() {
             )}
           </>
         )}
-        {activeTab === 'scores' && <ScoresTab weeklyResults={weeklyResults} saveResults={saveResults} onRefresh={load} />}
+        {activeTab === 'scores' && <ScoresTab weeklyResults={weeklyResults} trades={trades} saveResults={saveResults} onRefresh={load} />}
         {activeTab === 'standings' && <StandingsTab weeklyResults={weeklyResults} trades={trades} />}
         {activeTab === 'trend' && <TrendTab weeklyResults={weeklyResults} trades={trades} />}
         {activeTab === 'trades' && <TeamsTradesTab trades={trades} saveTrades={saveTrades} onRefresh={load} />}
@@ -335,7 +335,7 @@ function RemainingBox() {
   );
 }
 
-function ScoresTab({ weeklyResults, saveResults, onRefresh }) {
+function ScoresTab({ weeklyResults, trades, saveResults, onRefresh }) {
   const pin = useUnlock();
   const { unlocked } = pin;
   const [activeWeek, setActiveWeek] = useState(1);
@@ -388,7 +388,7 @@ function ScoresTab({ weeklyResults, saveResults, onRefresh }) {
             <div className="score-row" key={p.team}>
               <span className="team-tag">
                 <span className="sw" style={{ background: t.color }}></span>{t.abbr}
-                <span style={{ color: 'var(--sub)', fontWeight: 400 }}> — {managerById(p.managerId)?.name}</span>
+                <span style={{ color: 'var(--sub)', fontWeight: 400 }}> — {managerById(ownerAtWeek(p.team, activeWeek, trades))?.name}</span>
               </span>
               {unlocked ? (
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 5 }}>
