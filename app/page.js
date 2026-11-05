@@ -5,7 +5,10 @@ import { TEAMS, TEAM_MAP } from '../lib/teams';
 import { MANAGERS, DRAFT_ORDER, PICKS, ROUNDS_PER_MANAGER, LEAGUE_NAME, BUY_IN } from '../lib/draftResults';
 
 const TOTAL_WEEKS = 16;
-const ALL_TEAM_ABBRS = PICKS.map((p) => p.team);
+const DRAFTED_ABBRS = PICKS.map((p) => p.team);
+const ALL_TEAM_ABBRS = TEAMS.map((t) => t.abbr);
+const FREE_AGENT_ID = 'FA';
+const TRADE_DEADLINE_WEEK = 9;
 
 // Lightweight deterrent, not real security — anyone who views the page
 // source could find this. It just protects Save/Trade actions from
@@ -14,11 +17,13 @@ const SAVE_PIN = '1234';
 const UNLOCK_KEY = 'nfl10man:editUnlocked';
 
 function managerById(id) { return MANAGERS.find((m) => m.id === id); }
+function ownerName(id) { return managerById(id)?.name || 'Free agent'; }
+function isFreeAgent(id) { return !id || id === FREE_AGENT_ID; }
 function originalOwnerOf(abbr) { return PICKS.find((p) => p.team === abbr)?.managerId; }
 
 // Trades affecting one team, sorted by when they took effect.
 function tradesForTeam(abbr, trades) {
-  return trades.filter((t) => t.team === abbr).sort((a, b) => a.effectiveWeek - b.effectiveWeek);
+  return trades.filter((t) => t.team === abbr).sort((a, b) => a.effectiveWeek - b.effectiveWeek || (a.createdAt || 0) - (b.createdAt || 0));
 }
 
 // Who owns this team right now (after all recorded trades)?
@@ -273,6 +278,7 @@ export default function HomePage() {
           <button className={`tab-btn ${activeTab === 'standings' ? 'active' : ''}`} onClick={() => setActiveTab('standings')}>Standings</button>
           <button className={`tab-btn ${activeTab === 'trend' ? 'active' : ''}`} onClick={() => setActiveTab('trend')}>Trend</button>
           <button className={`tab-btn ${activeTab === 'trades' ? 'active' : ''}`} onClick={() => setActiveTab('trades')}>Teams &amp; Trades</button>
+          <button className={`tab-btn ${activeTab === 'fa' ? 'active' : ''}`} onClick={() => setActiveTab('fa')}>Free Agents</button>
         </div>
 
         {activeTab === 'board' && (
@@ -290,6 +296,7 @@ export default function HomePage() {
         {activeTab === 'standings' && <StandingsTab weeklyResults={weeklyResults} trades={trades} />}
         {activeTab === 'trend' && <TrendTab weeklyResults={weeklyResults} trades={trades} />}
         {activeTab === 'trades' && <TeamsTradesTab trades={trades} saveTrades={saveTrades} onRefresh={load} />}
+        {activeTab === 'fa' && <FreeAgentsTab trades={trades} saveTrades={saveTrades} />}
 
         <p className="footer-note">
           Pot: <span className="pot">${pot}</span> · Best record &amp; worst record split the pot (ties broken by best/worst single-team record) · No head-to-head · 16 week season
@@ -323,7 +330,7 @@ function BoardTable() {
 }
 
 function RemainingBox() {
-  const drafted = new Set(ALL_TEAM_ABBRS);
+  const drafted = new Set(DRAFTED_ABBRS);
   const remaining = TEAMS.filter((t) => !drafted.has(t.abbr));
   if (!remaining.length) return null;
   return (
@@ -349,7 +356,7 @@ function ScoresTab({ weeklyResults, trades, saveResults, onRefresh }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWeek]);
 
-  const draftedList = PICKS.slice().sort((a, b) => a.team.localeCompare(b.team));
+  const draftedList = ALL_TEAM_ABBRS.slice().sort().map((abbr) => ({ team: abbr }));
 
   function toggle(abbr, r) {
     setPending((prev) => {
@@ -389,7 +396,7 @@ function ScoresTab({ weeklyResults, trades, saveResults, onRefresh }) {
             <div className="score-row" key={p.team}>
               <span className="team-tag">
                 <span className="sw" style={{ background: t.color }}></span>{t.abbr}
-                <span style={{ color: 'var(--sub)', fontWeight: 400 }}> — {managerById(ownerAtWeek(p.team, activeWeek, trades))?.name}</span>
+                <span style={{ color: 'var(--sub)', fontWeight: 400 }}> — {ownerName(ownerAtWeek(p.team, activeWeek, trades))}</span>
               </span>
               {unlocked ? (
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 5 }}>
@@ -558,13 +565,15 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
     const abbr = tradingAbbr;
     const fromManagerId = currentOwnerOf(abbr, trades);
     if (newOwnerId === fromManagerId) { setError('That manager already owns this team.'); return; }
+    const wk = parseInt(effectiveWeek) || 1;
+    if (wk > TRADE_DEADLINE_WEEK) { setError(`Trade deadline is Week ${TRADE_DEADLINE_WEEK}.`); return; }
     setSaving(true);
     const trade = {
       id: `${abbr}-${Date.now()}`,
       team: abbr,
       fromManagerId,
       toManagerId: newOwnerId,
-      effectiveWeek: parseInt(effectiveWeek) || 1,
+      effectiveWeek: wk,
       createdAt: Date.now(),
     };
     await saveTrades([...trades, trade]);
@@ -574,7 +583,8 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
 
   async function undoTrade(id) {
     if (!confirm('Undo this trade?')) return;
-    await saveTrades(trades.filter((t) => t.id !== id));
+    const target = trades.find((t) => t.id === id);
+    await saveTrades(trades.filter((t) => t.id !== id && !(target?.swapId && t.swapId === target.swapId)));
   }
 
   const history = trades.slice().sort((a, b) => b.createdAt - a.createdAt);
@@ -592,13 +602,14 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
           const t = TEAM_MAP[abbr];
           const ownerId = currentOwnerOf(abbr, trades);
           const owner = managerById(ownerId);
+          const free = isFreeAgent(ownerId);
           return (
             <div className="score-row" key={abbr}>
               <span className="team-tag">
                 <span className="sw" style={{ background: t.color }}></span>{abbr}
               </span>
-              <span style={{ color: 'var(--sub)', marginLeft: 10 }}>{owner?.name}</span>
-              {unlocked && (
+              <span style={{ color: 'var(--sub)', marginLeft: 10 }}>{owner ? owner.name : 'Free agent'}</span>
+              {unlocked && !free && (
                 <button className="btn small" style={{ marginLeft: 'auto', padding: '6px 10px' }} onClick={() => openTradeForm(abbr)}>⇄ Trade</button>
               )}
             </div>
@@ -609,7 +620,7 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
       {unlocked && tradingAbbr && (
         <div className="card" style={{ marginTop: 16, borderColor: 'var(--accent-dim)' }}>
           <div style={{ fontFamily: 'var(--font-display)', fontSize: 15, marginBottom: 12 }}>
-            Trade <span style={{ color: 'var(--accent)' }}>{tradingAbbr}</span> from {managerById(currentOwnerOf(tradingAbbr, trades))?.name}
+            Trade <span style={{ color: 'var(--accent)' }}>{tradingAbbr}</span> from {ownerName(currentOwnerOf(tradingAbbr, trades))}
           </div>
           <div className="row" style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
             <div style={{ flex: 1 }}>
@@ -621,7 +632,7 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
             </div>
             <div>
               <label className="field-label">Effective week</label>
-              <input type="number" min={1} max={16} value={effectiveWeek} onChange={(e) => setEffectiveWeek(e.target.value)} style={{ width: 80, background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 }} />
+              <input type="number" min={1} max={TRADE_DEADLINE_WEEK} value={effectiveWeek} onChange={(e) => setEffectiveWeek(e.target.value)} style={{ width: 80, background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 }} />
             </div>
           </div>
           {error && <div style={{ color: '#ff8f8f', fontSize: 12, marginBottom: 10 }}>{error}</div>}
@@ -643,7 +654,7 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
               <div className="score-row" key={t.id}>
                 <span className="team-tag"><span className="sw" style={{ background: team.color }}></span>{t.team}</span>
                 <span style={{ color: 'var(--sub)', fontSize: 13, marginLeft: 10 }}>
-                  {managerById(t.fromManagerId)?.name} → {managerById(t.toManagerId)?.name}, effective Week {t.effectiveWeek}
+                  {ownerName(t.fromManagerId)} → {ownerName(t.toManagerId)}, effective Week {t.effectiveWeek}{t.swapId ? ' (free agent swap)' : ''}
                 </span>
                 {unlocked && (
                   <button className="btn small danger" style={{ marginLeft: 'auto', padding: '6px 10px' }} onClick={() => undoTrade(t.id)}>Undo</button>
@@ -651,6 +662,102 @@ function TeamsTradesTab({ trades, saveTrades, onRefresh }) {
               </div>
             );
           })}
+        </div>
+      )}
+    </>
+  );
+}
+
+function FreeAgentsTab({ trades, saveTrades }) {
+  const pin = useUnlock();
+  const { unlocked } = pin;
+  const [pickup, setPickup] = useState(null);
+  const [managerId, setManagerId] = useState('');
+  const [dropAbbr, setDropAbbr] = useState('');
+  const [effectiveWeek, setEffectiveWeek] = useState(TRADE_DEADLINE_WEEK);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const freeAgents = ALL_TEAM_ABBRS.filter((abbr) => isFreeAgent(currentOwnerOf(abbr, trades))).sort();
+  const myTeams = managerId ? ALL_TEAM_ABBRS.filter((abbr) => currentOwnerOf(abbr, trades) === managerId).sort() : [];
+
+  function openPickup(abbr) {
+    setPickup(abbr);
+    setManagerId('');
+    setDropAbbr('');
+    setEffectiveWeek(TRADE_DEADLINE_WEEK);
+    setError('');
+  }
+
+  async function confirmSwap() {
+    if (!managerId) { setError('Pick which manager is making the swap.'); return; }
+    if (!dropAbbr) { setError('Pick which of their teams to drop.'); return; }
+    const wk = parseInt(effectiveWeek) || 1;
+    if (wk > TRADE_DEADLINE_WEEK) { setError(`Deadline is Week ${TRADE_DEADLINE_WEEK}.`); return; }
+    setSaving(true);
+    const now = Date.now();
+    const swapId = `swap-${pickup}-${now}`;
+    const drop = { id: `${dropAbbr}-${now}`, swapId, team: dropAbbr, fromManagerId: managerId, toManagerId: FREE_AGENT_ID, effectiveWeek: wk, createdAt: now };
+    const add = { id: `${pickup}-${now + 1}`, swapId, team: pickup, fromManagerId: FREE_AGENT_ID, toManagerId: managerId, effectiveWeek: wk, createdAt: now + 1 };
+    await saveTrades([...trades, drop, add]);
+    setSaving(false);
+    setPickup(null);
+  }
+
+  const selectStyle = { width: '100%', background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 };
+
+  return (
+    <>
+      {!unlocked && <PinGate pin={pin} />}
+      <h2 className="section-title">Free Agents</h2>
+      <p style={{ color: 'var(--sub)', fontSize: 13, margin: '0 0 14px 0' }}>
+        Teams nobody owns. Swap one of your teams for a free agent through Week {TRADE_DEADLINE_WEEK}. Your dropped team goes back into this pool. Past results stay with whoever owned the team at the time.
+      </p>
+      <div className="card">
+        {freeAgents.length === 0 && <div style={{ color: 'var(--sub)', fontSize: 13 }}>No free agents right now.</div>}
+        {freeAgents.map((abbr) => {
+          const t = TEAM_MAP[abbr];
+          return (
+            <div className="score-row" key={abbr}>
+              <span className="team-tag"><span className="sw" style={{ background: t.color }}></span>{abbr}</span>
+              {unlocked && (
+                <button className="btn small" style={{ marginLeft: 'auto', padding: '6px 10px' }} onClick={() => openPickup(abbr)}>Pick up</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {unlocked && pickup && (
+        <div className="card" style={{ marginTop: 16, borderColor: 'var(--accent-dim)' }}>
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: 15, marginBottom: 12 }}>
+            Pick up <span style={{ color: 'var(--accent)' }}>{pickup}</span>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label className="field-label">Manager</label>
+            <select value={managerId} onChange={(e) => { setManagerId(e.target.value); setDropAbbr(''); }} style={selectStyle}>
+              <option value="">— pick manager —</option>
+              {MANAGERS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}>
+              <label className="field-label">Team to drop</label>
+              <select value={dropAbbr} onChange={(e) => setDropAbbr(e.target.value)} style={selectStyle} disabled={!managerId}>
+                <option value="">— pick team —</option>
+                {myTeams.map((abbr) => <option key={abbr} value={abbr}>{abbr}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="field-label">Effective week</label>
+              <input type="number" min={1} max={TRADE_DEADLINE_WEEK} value={effectiveWeek} onChange={(e) => setEffectiveWeek(e.target.value)} style={{ width: 80, background: 'var(--panel2)', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 12px', borderRadius: 7, fontSize: 15 }} />
+            </div>
+          </div>
+          {error && <div style={{ color: '#ff8f8f', fontSize: 12, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="btn primary" style={{ flex: 1 }} disabled={saving} onClick={confirmSwap}>{saving ? 'Saving…' : 'Confirm Swap'}</button>
+            <button className="btn" onClick={() => setPickup(null)}>Cancel</button>
+          </div>
         </div>
       )}
     </>
