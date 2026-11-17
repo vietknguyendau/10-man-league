@@ -213,6 +213,13 @@ export default function HomePage() {
     return () => clearInterval(poll);
   }, [load]);
 
+  // Lets phones offer "Install app" / "Add to Home Screen".
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  }, []);
+
   const saveResults = useCallback(async (nextResults) => {
     setSyncStatus('connecting');
     try {
@@ -493,6 +500,15 @@ function StandingsTab({ weeklyResults, trades }) {
   );
 }
 
+// Keeps the manager name column pinned on the left while the weeks scroll sideways.
+const STICKY_NAME = {
+  position: 'sticky',
+  left: 0,
+  zIndex: 2,
+  background: 'var(--panel, #141414)',
+  boxShadow: '1px 0 0 var(--line, #262626)',
+};
+
 function TrendTab({ weeklyResults, trades }) {
   const weeksWithData = Object.keys(weeklyResults).map(Number).sort((a, b) => a - b);
   const standings = computeStandings(weeklyResults, trades);
@@ -513,7 +529,7 @@ function TrendTab({ weeklyResults, trades }) {
       <table className="board">
         <thead>
           <tr>
-            <th>Manager</th>
+            <th style={{ ...STICKY_NAME, zIndex: 3 }}>Manager</th>
             {weeksWithData.map((w) => <th key={w}><span className="n">Wk</span>{w}</th>)}
             <th><span className="n">Season</span>Total</th>
           </tr>
@@ -521,7 +537,7 @@ function TrendTab({ weeklyResults, trades }) {
         <tbody>
           {standings.map((s) => (
             <tr key={s.manager.id}>
-              <td style={{ fontWeight: 700 }}>{s.manager.name}</td>
+              <td style={{ fontWeight: 700, ...STICKY_NAME }}>{s.manager.name}</td>
               {weeksWithData.map((w) => {
                 const teamsThatWeek = ALL_TEAM_ABBRS.filter((abbr) => ownerAtWeek(abbr, w, trades) === s.manager.id);
                 const rec = recordForTeams(teamsThatWeek, weeklyResults[String(w)] || {});
